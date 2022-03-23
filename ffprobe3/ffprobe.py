@@ -1,13 +1,12 @@
 """
 Python wrapper for ffprobe command line tool. ffprobe must exist in the path.
 """
-import functools
-import operator
 import os
 import pipes
 import platform
+import re
 import subprocess
-
+import pathlib
 from ffprobe3.exceptions import FFProbeError
 
 
@@ -17,72 +16,63 @@ class FFProbe:
         metadata=FFProbe('multimedia-file.mov')
     """
 
-    def __init__(self, path_to_video):
-        self.path_to_video = path_to_video
+    def __init__(self, video_file, cmmnds=""):
+        if not isinstance(cmmnds, str) and not isinstance(cmmnds, list):
+            cmmnds = ""
+        cmmnds = [] if cmmnds == "" or len(cmmnds) == 0 else cmmnds.split(" ")
+        video_file = str(pathlib.Path(video_file).resolve())
+        self.video_file = video_file
 
         try:
             with open(os.devnull, 'w') as tempf:
                 subprocess.check_call(["ffprobe", "-h"], stdout=tempf, stderr=tempf)
-        except FileNotFoundError:
+        except:
             raise IOError('ffprobe not found.')
-
-        if os.path.isfile(self.path_to_video):
-            if platform.system() == 'Windows':
-                cmd = ["ffprobe", "-show_streams", self.path_to_video]
+        if os.path.isfile(video_file):
+            if str(platform.system()) == 'Windows':
+                cmd = ["ffprobe", "-show_streams", self.video_file] + cmmnds
             else:
-                cmd = ["ffprobe -show_streams " + pipes.quote(self.path_to_video)]
+                cmd = ["ffprobe -show_streams " + pipes.quote(self.video_file)] + cmmnds
 
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-
-            stream = False
+            self.format = None
+            self.created = None
+            self.duration = None
+            self.start = None
+            self.bitrate = None
             self.streams = []
             self.video = []
             self.audio = []
-            self.subtitle = []
-            self.attachment = []
-
-            for line in iter(p.stdout.readline, b''):
-                line = line.decode('UTF-8')
-
-                if '[STREAM]' in line:
-                    stream = True
+            self.raw = []
+            data_lines = []
+            for a in iter(p.stdout.readline, b''):
+                a = a.decode('UTF-8')
+                self.raw.append(a)
+                if re.match(r'\[STREAM\]', a):
                     data_lines = []
-                elif '[/STREAM]' in line and stream:
-                    stream = False
-                    # noinspection PyUnboundLocalVariable
+                elif re.match(r'\[/STREAM\]', a):
                     self.streams.append(FFStream(data_lines))
-                elif stream:
-                    data_lines.append(line)
-
-            for line in iter(p.stderr.readline, b''):
-                line = line.decode('UTF-8')
-
-                if '[STREAM]' in line:
-                    stream = True
                     data_lines = []
-                elif '[/STREAM]' in line and stream:
-                    stream = False
+                else:
+                    data_lines.append(a)
+            for a in iter(p.stderr.readline, b''):
+                a = a.decode('UTF-8')
+                if re.match(r'\[STREAM\]', a):
+                    data_lines = []
+                elif re.match(r'\[/STREAM\]', a):
                     self.streams.append(FFStream(data_lines))
-                elif stream:
-                    data_lines.append(line)
-
+                    data_lines = []
+                else:
+                    data_lines.append(a)
             p.stdout.close()
             p.stderr.close()
-
-            for stream in self.streams:
-                if stream.is_audio():
-                    self.audio.append(stream)
-                elif stream.is_video():
-                    self.video.append(stream)
-                elif stream.is_subtitle():
-                    self.subtitle.append(stream)
-                elif stream.is_attachment():
-                    self.attachment.append(stream)
+            for a in self.streams:
+                if a.is_audio():
+                    self.audio.append(a)
+                if a.is_video():
+                    self.video.append(a)
         else:
-            raise IOError('No such media file ' + self.path_to_video)
-
-    def __repr__(self):
-        return "<FFprobe: {video}, {audio}, {subtitle}, {attachment}>".format(**vars(self))
+            raise IOError('No such media file ' + video_file)
 
 
 class FFStream:
@@ -91,58 +81,39 @@ class FFStream:
     """
 
     def __init__(self, data_lines):
-        for line in data_lines:
-            self.__dict__.update({key: value for key, value, *_ in [line.strip().split('=')]})
-
-            try:
-                self.__dict__['framerate'] = round(
-                    functools.reduce(
-                        operator.truediv, map(int, self.__dict__.get('avg_frame_rate', '').split('/'))
-                    )
-                )
-
-            except ValueError:
-                self.__dict__['framerate'] = None
-
-    def __repr__(self):
-        if self.is_video():
-            template = "<Stream: #{index} [{codec_type}] {codec_long_name}, {framerate}, ({width}x{height})>"
-
-        elif self.is_audio():
-            template = "<Stream: #{index} [{codec_type}] {codec_long_name}, channels: {channels} ({channel_layout}), " \
-                       "{sample_rate}Hz> "
-
-        elif self.is_subtitle() or self.is_attachment():
-            template = "<Stream: #{index} [{codec_type}] {codec_long_name}>"
-
-        else:
-            template = ''
-
-        return template.format(**self.__dict__)
+        for a in data_lines:
+            (key, val) = a.strip().split('=')
+            self.__dict__[key] = val
 
     def is_audio(self):
         """
         Is this stream labelled as an audio stream?
         """
-        return self.__dict__.get('codec_type', None) == 'audio'
+        val = False
+        if self.__dict__['codec_type']:
+            if str(self.__dict__['codec_type']) == 'audio':
+                val = True
+        return val
 
     def is_video(self):
         """
         Is the stream labelled as a video stream.
         """
-        return self.__dict__.get('codec_type', None) == 'video'
+        val = False
+        if self.__dict__['codec_type']:
+            if self.__dict__['codec_type'] == 'video':
+                val = True
+        return val
 
     def is_subtitle(self):
         """
         Is the stream labelled as a subtitle stream.
         """
-        return self.__dict__.get('codec_type', None) == 'subtitle'
-
-    def is_attachment(self):
-        """
-        Is the stream labelled as a attachment stream.
-        """
-        return self.__dict__.get('codec_type', None) == 'attachment'
+        val = False
+        if self.__dict__['codec_type']:
+            if self.__dict__['codec_type'] == 'subtitle':
+                val = True
+        return val
 
     def frame_size(self):
         """
@@ -153,14 +124,11 @@ class FFStream:
         if self.is_video():
             width = self.__dict__['width']
             height = self.__dict__['height']
-
             if width and height:
                 try:
                     size = (int(width), int(height))
                 except ValueError:
-                    raise FFProbeError("None integer size {}:{}".format(width, height))
-        else:
-            return None
+                    raise FFProbeError("None integer size %s:%s" % (width, height))
 
         return size
 
@@ -169,20 +137,23 @@ class FFStream:
         Returns a string representing the pixel format of the video stream. e.g. yuv420p.
         Returns none is it is not a video stream.
         """
-        return self.__dict__.get('pix_fmt', None)
+        f = None
+        if self.is_video():
+            if self.__dict__['pix_fmt']:
+                f = self.__dict__['pix_fmt']
+        return f
 
     def frames(self):
         """
         Returns the length of a video stream in frames. Returns 0 if not a video stream.
         """
+        frame_count = 0
         if self.is_video() or self.is_audio():
-            try:
-                frame_count = int(self.__dict__.get('nb_frames', ''))
-            except ValueError:
-                raise FFProbeError('None integer frame count')
-        else:
-            frame_count = 0
-
+            if self.__dict__['nb_frames']:
+                try:
+                    frame_count = int(self.__dict__['nb_frames'])
+                except ValueError:
+                    raise FFProbeError('None integer frame count')
         return frame_count
 
     def duration_seconds(self):
@@ -190,45 +161,59 @@ class FFStream:
         Returns the runtime duration of the video stream as a floating point number of seconds.
         Returns 0.0 if not a video stream.
         """
+        duration = 0.0
         if self.is_video() or self.is_audio():
-            try:
-                duration = float(self.__dict__.get('duration', ''))
-            except ValueError:
-                raise FFProbeError('None numeric duration')
-        else:
-            duration = 0.0
-
+            if self.__dict__['duration']:
+                try:
+                    duration = float(self.__dict__['duration'])
+                except ValueError:
+                    raise FFProbeError('None numeric duration')
         return duration
 
     def language(self):
         """
         Returns language tag of stream. e.g. eng
         """
-        return self.__dict__.get('TAG:language', None)
+        lang = None
+        if self.__dict__['TAG:language']:
+            lang = self.__dict__['TAG:language']
+        return lang
 
     def codec(self):
         """
         Returns a string representation of the stream codec.
         """
-        return self.__dict__.get('codec_name', None)
+        codec_name = None
+        if self.__dict__['codec_name']:
+            codec_name = self.__dict__['codec_name']
+        return codec_name
 
     def codec_description(self):
         """
         Returns a long representation of the stream codec.
         """
-        return self.__dict__.get('codec_long_name', None)
+        codec_d = None
+        if self.__dict__['codec_long_name']:
+            codec_d = self.__dict__['codec_long_name']
+        return codec_d
 
     def codec_tag(self):
         """
         Returns a short representative tag of the stream codec.
         """
-        return self.__dict__.get('codec_tag_string', None)
+        codec_t = None
+        if self.__dict__['codec_tag_string']:
+            codec_t = self.__dict__['codec_tag_string']
+        return codec_t
 
     def bit_rate(self):
         """
         Returns bit_rate as an integer in bps
         """
-        try:
-            return int(self.__dict__.get('bit_rate', ''))
-        except ValueError:
-            raise FFProbeError('None integer bit_rate')
+        b = 0
+        if self.__dict__['bit_rate']:
+            try:
+                b = int(self.__dict__['bit_rate'])
+            except ValueError:
+                raise FFProbeError('None integer bit_rate')
+        return b
